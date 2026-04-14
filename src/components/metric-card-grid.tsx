@@ -93,7 +93,7 @@ export default function MetricCardGrid({ data }: MetricCardGridProps) {
           <MetricCard
             label="카페"
             value={formatNumber(content.monthlyPublication.cafe)}
-            sub="추정"
+            sub={content.monthlyPublication.cafeIsEstimated ? '추정' : undefined}
             borderColor="border-teal-500"
           />
           <MetricCard

@@ -48,17 +48,21 @@ export function calculatePredictedMonthlySearch(
 /**
  * 기회 점수 (0~100): 이 키워드로 콘텐츠를 만들었을 때의 노출 가능성.
  * - 검색량이 높을수록 가산
- * - 월간 발행량이 적을수록 가산 (경쟁 적음)
+ * - 경쟁(발행량/문서수)이 적을수록 가산
  * - 롱테일 키워드 보너스
  * - 상승 추세 보너스
+ *
+ * monthlyPublicationTotal: 월간 발행량(메인 키워드용)
+ * totalBlogCount: 블로그 총 문서수(연관 키워드용). 제공 시 우선 사용.
  */
 export function calculateOpportunityScore(params: {
   monthlySearchTotal: number;
   monthlyPublicationTotal: number;
+  totalBlogCount?: number;
   keyword: string;
   trendPoints?: TrendPoint[];
 }): number {
-  const { monthlySearchTotal, monthlyPublicationTotal, keyword, trendPoints } = params;
+  const { monthlySearchTotal, monthlyPublicationTotal, totalBlogCount, keyword, trendPoints } = params;
 
   if (monthlySearchTotal === 0) return 0;
 
@@ -68,12 +72,24 @@ export function calculateOpportunityScore(params: {
     OPPORTUNITY_SCORE_MAX *
     OPPORTUNITY_WEIGHTS.SEARCH_VOLUME;
 
-  // 경쟁도 점수: 월간 발행량 대비 검색량 (발행 적을수록 높음) (0~35)
-  const pubToSearchRatio = monthlyPublicationTotal / Math.max(monthlySearchTotal, 1);
-  const competitionScore =
-    Math.max(1 - Math.min(pubToSearchRatio * 10, 1), 0) *
-    OPPORTUNITY_SCORE_MAX *
-    OPPORTUNITY_WEIGHTS.LOW_COMPETITION;
+  // 경쟁도 점수 (0~35)
+  // totalBlogCount 있으면 블로그 총 문서수 기준, 없으면 월간 발행량 기준
+  let competitionScore: number;
+  if (totalBlogCount !== undefined) {
+    // 검색량 대비 총 문서수 비율: 낮을수록 경쟁 적음
+    // ratio < 1: 매우 낮음 / 1~5: 낮음 / 5~20: 보통 / 20+: 높음
+    const ratio = totalBlogCount / Math.max(monthlySearchTotal, 1);
+    competitionScore =
+      Math.max(1 - Math.min(ratio / 5, 1), 0) *
+      OPPORTUNITY_SCORE_MAX *
+      OPPORTUNITY_WEIGHTS.LOW_COMPETITION;
+  } else {
+    const pubToSearchRatio = monthlyPublicationTotal / Math.max(monthlySearchTotal, 1);
+    competitionScore =
+      Math.max(1 - Math.min(pubToSearchRatio * 10, 1), 0) *
+      OPPORTUNITY_SCORE_MAX *
+      OPPORTUNITY_WEIGHTS.LOW_COMPETITION;
+  }
 
   // 롱테일 보너스 (0~15)
   const wordCount = keyword.trim().split(/\s+/).length;

@@ -13,11 +13,13 @@ export interface RelatedKeyword {
   monthlyMobileQcCnt: number;
   monthlyTotalQcCnt: number;
   competitionIndex: string;
+  totalBlogCount?: number;
 }
 
 export interface MonthlyPublication {
   blog: number;
   cafe: number;
+  cafeIsEstimated?: boolean;
   total: number;
 }
 

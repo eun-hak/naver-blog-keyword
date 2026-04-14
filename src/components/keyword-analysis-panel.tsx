@@ -15,8 +15,10 @@ type PanelState =
 
 export default function KeywordAnalysisPanel() {
   const [state, setState] = useState<PanelState>({ status: 'idle' });
+  const [inputKeyword, setInputKeyword] = useState('');
 
   const handleSearch = async (keyword: string) => {
+    setInputKeyword(keyword);
     setState({ status: 'loading' });
 
     try {
@@ -42,6 +44,8 @@ export default function KeywordAnalysisPanel() {
   return (
     <div className="space-y-6">
       <KeywordSearchForm
+        value={inputKeyword}
+        onChange={setInputKeyword}
         onSearch={handleSearch}
         isLoading={state.status === 'loading'}
       />

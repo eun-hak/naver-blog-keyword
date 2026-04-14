@@ -1,5 +1,5 @@
 import { getSearchVolume } from '@/lib/naver-ad';
-import { getContentAnalysis } from '@/lib/naver-search';
+import { getContentAnalysis, fetchBlogTotalCount } from '@/lib/naver-search';
 import { getKeywordTrend } from '@/lib/naver-datalab';
 import { analysisCache } from '@/lib/cache';
 import { calculateAllMetrics, calculateOpportunityScore } from '@/utils/metrics';
@@ -27,14 +27,26 @@ export async function analyzeKeyword(
     trendPoints: trendResult.points,
   });
 
-  const relatedKeywords = searchVolumeResult.relatedKeywords.map((rk) => ({
-    ...rk,
-    opportunityScore: calculateOpportunityScore({
-      monthlySearchTotal: rk.monthlyTotalQcCnt,
-      monthlyPublicationTotal: contentAnalysis.monthlyPublication.total,
-      keyword: rk.keyword,
-    }),
-  }));
+  // 검색량 기준 정렬 후 전체 연관 키워드의 블로그 총 문서수를 병렬 조회
+  const topRelated = [...searchVolumeResult.relatedKeywords]
+    .sort((a, b) => b.monthlyTotalQcCnt - a.monthlyTotalQcCnt);
+
+  const blogCounts = await Promise.all(
+    topRelated.map((rk) => fetchBlogTotalCount(rk.keyword))
+  );
+
+  const relatedKeywords = topRelated
+    .map((rk, i) => ({
+      ...rk,
+      totalBlogCount: blogCounts[i],
+      opportunityScore: calculateOpportunityScore({
+        monthlySearchTotal: rk.monthlyTotalQcCnt,
+        monthlyPublicationTotal: 0,
+        totalBlogCount: blogCounts[i],
+        keyword: rk.keyword,
+      }),
+    }))
+    .sort((a, b) => b.opportunityScore - a.opportunityScore);
 
   const result: KeywordAnalysisResult = {
     keyword,

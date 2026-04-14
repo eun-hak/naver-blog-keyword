@@ -1,4 +1,4 @@
-import KeywordAnalysisPanel from '@/components/keyword-analysis-panel';
+import MainTabs from '@/components/main-tabs';
 
 export default function Home() {
   return (
@@ -19,8 +19,8 @@ export default function Home() {
         </div>
       </header>
 
-      <div className="max-w-6xl mx-auto px-4 py-8">
-        <KeywordAnalysisPanel />
+      <div className="max-w-6xl mx-auto px-4 py-6">
+        <MainTabs />
       </div>
 
       <footer className="border-t border-gray-200 bg-white mt-auto">
