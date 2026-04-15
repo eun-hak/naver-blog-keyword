@@ -2,6 +2,33 @@ import { NAVER_SEARCH_API_BASE, SEARCH_TYPES, ERROR_MESSAGES } from '@/constants
 import type { NaverSearchResponse, NaverSearchType } from '@/types/naver-api';
 import type { ContentAnalysis } from '@/types/keyword';
 
+/**
+ * 네이버 자동완성 API로 관련 키워드 수집.
+ * 광고 API와 달리 비상업적 키워드도 풍부한 결과 반환.
+ */
+export async function fetchAutocompleteSuggestions(query: string): Promise<string[]> {
+  try {
+    const url = `https://ac.search.naver.com/nx/ac?q=${encodeURIComponent(query)}&con=1&frm=nv&ans=2&r_format=json&r_enc=UTF-8&q_enc=UTF-8&st=100&r_lt=100&r_unicode=0&t_koreng=1&run=2&rev=4`;
+    const res = await fetch(url, {
+      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' },
+    });
+    if (!res.ok) return [];
+    const data = await res.json();
+    const items: unknown[][] = data.items ?? [];
+    const keywords: string[] = [];
+    for (const group of items) {
+      for (const entry of group) {
+        if (Array.isArray(entry) && typeof entry[0] === 'string') {
+          keywords.push(entry[0]);
+        }
+      }
+    }
+    return keywords;
+  } catch {
+    return [];
+  }
+}
+
 function getSearchHeaders() {
   const clientId = process.env.NAVER_CLIENT_ID;
   const clientSecret = process.env.NAVER_CLIENT_SECRET;

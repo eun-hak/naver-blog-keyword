@@ -73,6 +73,10 @@ export default function KeywordDiscoveryPanel() {
     setLogs([`🚀 "${keyword}" ${MODE_INFO[mode].label} 시작 (예상 소요: ${MODE_INFO[mode].time})`]);
     setProgressPct(0);
 
+    // 스테일 클로저 방지: 로컬 카운터로 발굴 수 추적
+    let localCount = 0;
+    let serverTotal = 0;
+
     try {
       const res = await fetch('/api/keywords/discover', {
         method: 'POST',
@@ -102,15 +106,17 @@ export default function KeywordDiscoveryPanel() {
               setProgressPct(event.done);
             } else if (event.type === 'found') {
               const kw = event.keyword;
+              localCount++;
               setResults((prev) => [...prev, kw]);
               const pubLabel = kw.isCapped
-                ? `${kw.monthlyBlogCount}건+`
+                ? `~${kw.monthlyBlogCount}+건`
                 : `${kw.monthlyBlogCount}건`;
               setLogs((prev) => [
                 ...prev,
                 `  ✅ [${kw.level}단계] ${kw.keyword} — 검색 ${formatNum(kw.monthlyTotalQcCnt)} / 월발행 ${pubLabel}`,
               ]);
             } else if (event.type === 'done') {
+              serverTotal = event.total;
               setIsDone(true);
               setProgressPct(100);
             }
@@ -124,9 +130,10 @@ export default function KeywordDiscoveryPanel() {
     } finally {
       setIsRunning(false);
       setIsDone(true);
-      setLogs((prev) => [...prev, `🏁 완료 (${results.length}개 발굴)`]);
+      const displayCount = serverTotal > 0 ? serverTotal : localCount;
+      setLogs((prev) => [...prev, `🏁 완료 — ${displayCount}개 발굴`]);
     }
-  }, [keyword, maxDocs, minSearch, mode, results.length]);
+  }, [keyword, maxDocs, minSearch, mode]);
 
   const handleStop = () => {
     abortRef.current?.abort();

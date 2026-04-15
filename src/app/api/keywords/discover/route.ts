@@ -1,6 +1,10 @@
 import { NextRequest } from 'next/server';
 import { fetchKeywordStats } from '@/lib/naver-ad';
-import { fetchFastMonthlyBlogCount, fetchQuickMonthlyBlogCount } from '@/lib/naver-search';
+import {
+  fetchFastMonthlyBlogCount,
+  fetchQuickMonthlyBlogCount,
+  fetchAutocompleteSuggestions,
+} from '@/lib/naver-search';
 
 export interface DiscoveredKeyword {
   keyword: string;
@@ -8,8 +12,8 @@ export interface DiscoveredKeyword {
   monthlyPcQcCnt: number;
   monthlyMobileQcCnt: number;
   monthlyBlogCount: number;
-  isCapped: boolean;    // 빠른 모드: 실제 발행량이 100 이상일 수 있음
-  isOver1000: boolean;  // 정확 모드: 외삽 여부
+  isCapped: boolean;
+  isOver1000: boolean;
   opportunityRatio: number;
   level: 1 | 2 | 3;
 }
@@ -22,27 +26,32 @@ export type DiscoverEvent =
 // ── 모드별 설정 ──
 const MODE_CONFIG = {
   fast: {
-    docBatch: 8,        // 배치당 병렬 키워드 수
-    docDelay: 150,      // 배치 사이 딜레이 (ms)
-    hintDelay: 200,     // Ad API 배치 딜레이
-    maxSeedsL2: 40,
-    maxSeedsL3: 20,
+    docBatch: 8,
+    docDelay: 150,
+    hintDelay: 200,
     retryOnError: false,
     label: '빠른 발굴',
   },
   accurate: {
-    docBatch: 3,        // 배치당 병렬 키워드 수 (각 2 API 콜 → 배치당 최대 6콜)
-    docDelay: 600,      // rate limit 여유 딜레이
+    docBatch: 3,
+    docDelay: 600,
     hintDelay: 350,
-    maxSeedsL2: 40,
-    maxSeedsL3: 20,
-    retryOnError: true,  // rate limit 에러 시 재시도
+    retryOnError: true,
     label: '정확한 발굴',
   },
 } as const;
 
 type Mode = keyof typeof MODE_CONFIG;
 const HINT_BATCH = 5;
+
+// 자동완성 확장에 쓸 한글 자모/접미사
+const SUFFIXES = [
+  '', // 기본 검색
+  ' ', // 공백 뒤 자동완성
+  '추천', '방법', '후기', '나이', '정보', '뜻', '종류',
+  '비용', '효과', '부작용', '차이', '순위',
+];
+const JAMO = ['ㄱ', 'ㄴ', 'ㄷ', 'ㄹ', 'ㅁ', 'ㅂ', 'ㅅ', 'ㅇ', 'ㅈ', 'ㅊ', 'ㅋ', 'ㅌ', 'ㅍ', 'ㅎ'];
 
 function delay(ms: number) {
   return new Promise((r) => setTimeout(r, ms));
@@ -53,18 +62,66 @@ function normalizeCount(v: number | string): number {
   return isNaN(v) ? 0 : v;
 }
 
-async function expandWithHints(
+// ────────────────────────────────────────────
+// 0단계: 시드 키워드 대량 확보 (자동완성 + 조합)
+// ────────────────────────────────────────────
+async function collectSeeds(
+  keyword: string,
+  onProgress?: (msg: string) => void
+): Promise<string[]> {
+  const seeds = new Set<string>();
+  seeds.add(keyword);
+
+  // 1) 자동완성: 기본 + 접미사 조합
+  const autocompleteQueries = SUFFIXES.map((s) => `${keyword}${s}`);
+  // 2) 자동완성: 자모 접미 (ex: "정년ㄱ", "정년ㄴ" ...)
+  for (const j of JAMO) {
+    autocompleteQueries.push(`${keyword} ${j}`);
+    autocompleteQueries.push(`${keyword}${j}`);
+  }
+
+  onProgress?.(`자동완성 ${autocompleteQueries.length}개 쿼리 수집 중...`);
+
+  // 4개씩 병렬 요청 (자동완성 API는 rate limit 여유)
+  const AC_BATCH = 4;
+  for (let i = 0; i < autocompleteQueries.length; i += AC_BATCH) {
+    const batch = autocompleteQueries.slice(i, i + AC_BATCH);
+    const results = await Promise.all(batch.map(fetchAutocompleteSuggestions));
+    for (const suggestions of results) {
+      for (const s of suggestions) {
+        seeds.add(s.trim());
+      }
+    }
+    if (i + AC_BATCH < autocompleteQueries.length) await delay(80);
+  }
+
+  onProgress?.(`자동완성에서 ${seeds.size}개 시드 확보`);
+  return Array.from(seeds);
+}
+
+// ────────────────────────────────────────────
+// Ad API 배치 호출: 시드들의 검색량 조회
+// ────────────────────────────────────────────
+interface VolumeInfo { pc: number; mobile: number; total: number }
+
+async function fetchVolumes(
   seeds: string[],
   alreadySeen: Set<string>,
   minSearch: number,
   hintDelay: number,
   onProgress?: (msg: string) => void
-): Promise<Map<string, { pc: number; mobile: number; total: number }>> {
-  const discovered = new Map<string, { pc: number; mobile: number; total: number }>();
+): Promise<{
+  candidates: Map<string, VolumeInfo>;
+  allKeywords: Map<string, number>;
+}> {
+  const candidates = new Map<string, VolumeInfo>();
+  const allKeywords = new Map<string, number>();
 
   for (let i = 0; i < seeds.length; i += HINT_BATCH) {
     const batch = seeds.slice(i, i + HINT_BATCH);
-    onProgress?.(`Ad API ${Math.floor(i / HINT_BATCH) + 1}/${Math.ceil(seeds.length / HINT_BATCH)}`);
+    const batchNum = Math.floor(i / HINT_BATCH) + 1;
+    const totalBatches = Math.ceil(seeds.length / HINT_BATCH);
+    onProgress?.(`Ad API ${batchNum}/${totalBatches}`);
 
     try {
       const list = await fetchKeywordStats(batch);
@@ -74,7 +131,8 @@ async function expandWithHints(
         const pc = normalizeCount(item.monthlyPcQcCnt);
         const mobile = normalizeCount(item.monthlyMobileQcCnt);
         const total = pc + mobile;
-        if (total >= minSearch) discovered.set(kw, { pc, mobile, total });
+        allKeywords.set(kw, total);
+        if (total >= minSearch) candidates.set(kw, { pc, mobile, total });
         alreadySeen.add(kw);
       }
     } catch { /* 배치 실패 무시 */ }
@@ -82,11 +140,14 @@ async function expandWithHints(
     if (i + HINT_BATCH < seeds.length) await delay(hintDelay);
   }
 
-  return discovered;
+  return { candidates, allKeywords };
 }
 
+// ────────────────────────────────────────────
+// 월간 발행량 조회 + 결과 emit
+// ────────────────────────────────────────────
 async function filterAndEmit(
-  candidates: Map<string, { pc: number; mobile: number; total: number }>,
+  candidates: Map<string, VolumeInfo>,
   maxMonthly: number,
   level: 1 | 2 | 3,
   mode: Mode,
@@ -105,15 +166,13 @@ async function filterAndEmit(
     let fetchResults: Array<{ monthly: number; isCapped?: boolean; isOver1000?: boolean }>;
 
     if (mode === 'fast') {
-      // 빠른 모드: 1 API 콜/키워드
       fetchResults = await Promise.all(batch.map((kw) => fetchFastMonthlyBlogCount(kw)));
     } else {
-      // 정확 모드: 2 API 콜/키워드 + rate limit 에러 시 재시도
       fetchResults = await Promise.all(
         batch.map(async (kw) => {
           let res = await fetchQuickMonthlyBlogCount(kw);
           if (res.monthly === -1 && cfg.retryOnError) {
-            await delay(1200); // rate limit 풀릴 때까지 대기
+            await delay(1200);
             res = await fetchQuickMonthlyBlogCount(kw);
           }
           return res;
@@ -128,13 +187,12 @@ async function filterAndEmit(
       const isOver1000 = (fetchResults[j] as { isOver1000?: boolean }).isOver1000 ?? false;
       const vol = candidates.get(kw)!;
 
-      // -1 은 에러 → 제외 / isCapped 는 실제 100+ → maxMonthly > 100이어야 포함
       if (monthly < 0) continue;
-      if (isCapped && maxMonthly <= 100) continue; // 빠른 모드: 100 이상인데 threshold 낮으면 제외
+      if (isCapped && maxMonthly <= 100) continue;
       if (!isCapped && monthly > maxMonthly) continue;
       if (alreadyFound.has(kw)) continue;
 
-      const effectiveMonthly = isCapped ? 100 : monthly; // 표시용
+      const effectiveMonthly = isCapped ? 100 : monthly;
       const entry: DiscoveredKeyword = {
         keyword: kw,
         monthlyTotalQcCnt: vol.total,
@@ -154,6 +212,9 @@ async function filterAndEmit(
   }
 }
 
+// ────────────────────────────────────────────
+// POST handler
+// ────────────────────────────────────────────
 export async function POST(request: NextRequest) {
   const body = await request.json();
   const keyword: string = (body.keyword ?? '').trim();
@@ -170,71 +231,101 @@ export async function POST(request: NextRequest) {
     async start(controller) {
       function send(event: DiscoverEvent) {
         try { controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`)); }
-        catch { /* 스트림 종료 후 무시 */ }
+        catch { /* stream closed */ }
       }
 
       try {
         const found = new Map<string, DiscoveredKeyword>();
         const seen = new Set<string>([keyword]);
 
-        // ── 1단계 ──
-        send({ type: 'progress', message: `"${keyword}" 연관 키워드 수집 중...`, done: 0, total: 100 });
+        // ═══════════════════════════════════
+        // 0단계: 시드 대량 확보 (자동완성 + 조합)
+        // ═══════════════════════════════════
+        send({ type: 'progress', message: `네이버 자동완성으로 시드 키워드 수집 중...`, done: 0, total: 100 });
 
-        const rawL1 = await fetchKeywordStats([keyword]);
-        const level1Candidates = new Map<string, { pc: number; mobile: number; total: number }>();
+        const allSeeds = await collectSeeds(keyword, (msg) =>
+          send({ type: 'progress', message: msg, done: 2, total: 100 })
+        );
 
-        for (const item of rawL1) {
-          const kw = item.relKeyword;
-          seen.add(kw);
-          const pc = normalizeCount(item.monthlyPcQcCnt);
-          const mobile = normalizeCount(item.monthlyMobileQcCnt);
-          const total = pc + mobile;
-          if (total >= minSearch) level1Candidates.set(kw, { pc, mobile, total });
-        }
+        send({
+          type: 'progress',
+          message: `0단계: 자동완성에서 ${allSeeds.length}개 시드 확보. Ad API로 검색량 조회 중...`,
+          done: 5,
+          total: 100,
+        });
 
-        send({ type: 'progress', message: `1단계: ${level1Candidates.size}개 후보 발견`, done: 5, total: 100 });
+        // ═══════════════════════════════════
+        // 1단계: 자동완성 시드 → Ad API 검색량 조회
+        // ═══════════════════════════════════
+        const l1Result = await fetchVolumes(allSeeds, seen, minSearch, cfg.hintDelay,
+          (msg) => send({ type: 'progress', message: `1단계 ${msg}`, done: 15, total: 100 })
+        );
 
-        await filterAndEmit(level1Candidates, maxDocs, 1, mode, found,
+        send({
+          type: 'progress',
+          message: `1단계: ${l1Result.allKeywords.size}개 연관어 발견 (검색량 통과: ${l1Result.candidates.size}개), 월발행 조회 중...`,
+          done: 25,
+          total: 100,
+        });
+
+        await filterAndEmit(l1Result.candidates, maxDocs, 1, mode, found,
           (kw) => send({ type: 'found', keyword: kw }),
-          (msg) => send({ type: 'progress', message: `1단계 ${msg}`, done: 10, total: 100 })
+          (msg) => send({ type: 'progress', message: `1단계 ${msg}`, done: 30, total: 100 })
         );
 
-        send({ type: 'progress', message: `1단계 완료 (${found.size}개). 2단계 확장 중...`, done: 30, total: 100 });
+        send({ type: 'progress', message: `1단계 완료 (${found.size}개). 2단계 확장 중...`, done: 40, total: 100 });
 
-        // ── 2단계 ──
-        const seeds2 = Array.from(level1Candidates.keys())
-          .sort((a, b) => level1Candidates.get(b)!.total - level1Candidates.get(a)!.total)
-          .slice(0, cfg.maxSeedsL2);
+        // ═══════════════════════════════════
+        // 2단계: 1단계 전체 키워드로 Ad API 재확장
+        // ═══════════════════════════════════
+        const seeds2 = Array.from(l1Result.allKeywords.entries())
+          .sort(([, a], [, b]) => b - a)
+          .slice(0, 50)
+          .map(([k]) => k);
 
-        const level2Candidates = await expandWithHints(seeds2, seen, minSearch, cfg.hintDelay,
-          (msg) => send({ type: 'progress', message: `2단계 ${msg}`, done: 40, total: 100 })
+        const l2Result = await fetchVolumes(seeds2, seen, minSearch, cfg.hintDelay,
+          (msg) => send({ type: 'progress', message: `2단계 ${msg}`, done: 50, total: 100 })
         );
 
-        if (level2Candidates.size > 0) {
-          send({ type: 'progress', message: `2단계: ${level2Candidates.size}개 신규 후보`, done: 55, total: 100 });
-          await filterAndEmit(level2Candidates, maxDocs, 2, mode, found,
+        send({
+          type: 'progress',
+          message: `2단계: ${l2Result.allKeywords.size}개 신규 (검색량 통과: ${l2Result.candidates.size}개)`,
+          done: 60,
+          total: 100,
+        });
+
+        if (l2Result.candidates.size > 0) {
+          await filterAndEmit(l2Result.candidates, maxDocs, 2, mode, found,
             (kw) => send({ type: 'found', keyword: kw }),
-            (msg) => send({ type: 'progress', message: `2단계 ${msg}`, done: 60, total: 100 })
+            (msg) => send({ type: 'progress', message: `2단계 ${msg}`, done: 65, total: 100 })
           );
         }
 
-        send({ type: 'progress', message: `2단계 완료 (${found.size}개). 3단계 심층 확장 중...`, done: 70, total: 100 });
+        send({ type: 'progress', message: `2단계 완료 (${found.size}개). 3단계 심층 확장 중...`, done: 75, total: 100 });
 
-        // ── 3단계 ──
+        // ═══════════════════════════════════
+        // 3단계: 2단계 + 1단계 상위 키워드로 한 번 더 확장
+        // ═══════════════════════════════════
         const seeds3 = [
-          ...Array.from(level2Candidates.entries()).sort(([, a], [, b]) => b.total - a.total).slice(0, 10).map(([k]) => k),
-          ...Array.from(level1Candidates.entries()).sort(([, a], [, b]) => b.total - a.total).slice(0, 10).map(([k]) => k),
-        ].filter((k, i, arr) => arr.indexOf(k) === i).slice(0, cfg.maxSeedsL3);
+          ...Array.from(l2Result.allKeywords.entries()).sort(([, a], [, b]) => b - a).slice(0, 15).map(([k]) => k),
+          ...Array.from(l1Result.allKeywords.entries()).sort(([, a], [, b]) => b - a).slice(0, 15).map(([k]) => k),
+        ].filter((k, i, arr) => arr.indexOf(k) === i).slice(0, 25);
 
-        const level3Candidates = await expandWithHints(seeds3, seen, minSearch, cfg.hintDelay,
-          (msg) => send({ type: 'progress', message: `3단계 ${msg}`, done: 80, total: 100 })
+        const l3Result = await fetchVolumes(seeds3, seen, minSearch, cfg.hintDelay,
+          (msg) => send({ type: 'progress', message: `3단계 ${msg}`, done: 85, total: 100 })
         );
 
-        if (level3Candidates.size > 0) {
-          send({ type: 'progress', message: `3단계: ${level3Candidates.size}개 신규 후보`, done: 88, total: 100 });
-          await filterAndEmit(level3Candidates, maxDocs, 3, mode, found,
+        send({
+          type: 'progress',
+          message: `3단계: ${l3Result.allKeywords.size}개 신규 (검색량 통과: ${l3Result.candidates.size}개)`,
+          done: 90,
+          total: 100,
+        });
+
+        if (l3Result.candidates.size > 0) {
+          await filterAndEmit(l3Result.candidates, maxDocs, 3, mode, found,
             (kw) => send({ type: 'found', keyword: kw }),
-            (msg) => send({ type: 'progress', message: `3단계 ${msg}`, done: 92, total: 100 })
+            (msg) => send({ type: 'progress', message: `3단계 ${msg}`, done: 95, total: 100 })
           );
         }
 
