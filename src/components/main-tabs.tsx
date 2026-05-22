@@ -3,10 +3,12 @@
 import { useState } from 'react';
 import KeywordAnalysisPanel from '@/components/keyword-analysis-panel';
 import KeywordDiscoveryPanel from '@/components/keyword-discovery-panel';
+import GoldenKeywordPanel from '@/components/golden-keyword-panel';
 
 const TABS = [
   { id: 'analyze', label: '키워드 분석', icon: '📊' },
   { id: 'discover', label: '키워드 발굴', icon: '🔍' },
+  { id: 'golden', label: '황금 키워드', icon: '🏆' },
 ] as const;
 
 type TabId = (typeof TABS)[number]['id'];
@@ -37,6 +39,7 @@ export default function MainTabs() {
       {/* 탭 콘텐츠 */}
       {activeTab === 'analyze' && <KeywordAnalysisPanel />}
       {activeTab === 'discover' && <KeywordDiscoveryPanel />}
+      {activeTab === 'golden' && <GoldenKeywordPanel />}
     </div>
   );
 }
